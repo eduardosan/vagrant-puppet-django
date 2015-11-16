@@ -1,3 +1,6 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
 Exec { path => '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' }
 
 include timezone
@@ -5,7 +8,7 @@ include user
 include apt
 include nginx
 include uwsgi
-include mysql
+include postgresql
 include python
 include virtualenv
 include pildeps
@@ -57,33 +60,6 @@ class user {
   }
 }
 
-class apt {
-  exec { 'apt-get update':
-    timeout => 0
-  }
-
-  package { 'python-software-properties':
-    ensure => latest,
-    require => Exec['apt-get update']
-  }
-
-  exec { 'add-apt-repository ppa:nginx/stable':
-    require => Package['python-software-properties'],
-    before => Exec['last ppa']
-  }
-
-  exec { 'last ppa':
-    command => 'add-apt-repository ppa:git-core/ppa',
-    require => Package['python-software-properties']
-  }
-
-  exec { 'apt-get update again':
-    command => 'apt-get update',
-    timeout => 0,
-    require => Exec['last ppa']
-  }
-}
-
 class nginx {
   package { 'nginx':
     ensure => latest,
@@ -117,9 +93,9 @@ class nginx {
 }
 
 class uwsgi {
-  $sock_dir = '/tmp/uwsgi' # Without a trailing slash
-  $uwsgi_user = 'www-data'
-  $uwsgi_group = 'www-data'
+  $sock_dir = '/var/run/uwsgi' # Without a trailing slash
+  $uwsgi_user = $user
+  $uwsgi_group = $user
 
   package { 'uwsgi':
     ensure => latest,
@@ -168,35 +144,61 @@ class uwsgi {
     target => "/etc/uwsgi/apps-available/${project}.ini",
     require => File['apps-available config']
   }
+
+  # Diretório de logs
+  file { ["/var/log/${project}"]:
+    ensure => directory,
+    owner => "${uwsgi_user}",
+    group => "${uwsgi_user}",
+    require => Package['uwsgi']
+  }
+
 }
 
-class mysql {
-  $create_db_cmd = "CREATE DATABASE ${db_name} CHARACTER SET utf8;"
-  $create_user_cmd = "CREATE USER '${db_user}'@localhost IDENTIFIED BY '${db_password}';"
-  $grant_db_cmd = "GRANT ALL PRIVILEGES ON ${db_name}.* TO '${db_user}'@localhost;"
+class postgresql {
 
-  package { 'mysql-server':
-    ensure => latest,
-    require => Class['apt']
+  class { 'postgresql::globals':
+    version             => '9.4',
+    manage_package_repo => true,
+    encoding            => "UTF8",
+    #locale              => "pt_BR.UTF-8",
+    # TODO: remove the next line after PostgreSQL 9.4 release
+    postgis_version     => '2.1',
+  }->
+  class { 'postgresql::server':
+    listen_addresses => '127.0.0.1',
+    port   => 5432,
+    ip_mask_allow_all_users    => '127.0.0.1/32',
   }
 
-  package { 'libmysqlclient-dev':
-    ensure => latest,
-    require => Class['apt']
+  postgresql::server::role { "${user}":
+    superuser => true,
+    require   => Class['postgresql::server']
   }
 
-  service { 'mysql':
-    ensure => running,
-    enable => true,
-    require => Package['mysql-server']
+  postgresql::server::db { "${db_name}":
+    encoding => 'UTF8',
+    user => "${db_user}",
+    owner => "${db_user}",
+    password => postgresql_password("${db_user}", "${db_password}"),
+    require  => Class['postgresql::server']
   }
 
-  exec { 'grant user db':
-    command => "mysql -u root -e \"${create_db_cmd}${create_user_cmd}${grant_db_cmd}\"",
-    unless => "mysqlshow -u${db_user} -p${db_password} ${db_name}",
-    require => Service['mysql']
+  postgresql::server::role { "${db_user}":
+    createdb => true,
+    require  => Class['postgresql::server']
+  }
+
+  package { 'libpq-dev':
+    ensure => installed
+  }
+
+  package { 'postgresql-contrib':
+    ensure  => installed,
+    require => Class['postgresql::server'],
   }
 }
+
 
 class python {
   package { 'curl':
@@ -230,17 +232,38 @@ class virtualenv {
   exec { 'create virtualenv':
     command => "virtualenv --always-copy ${domain_name}",
     cwd => "/home/${user}/virtualenvs",
-    user => $user,
+    #user => $user,
     require => Package['virtualenv']
   }
 
-  file { "/home/${user}/virtualenvs/${domain_name}/requirements.txt":
+  # Cria estrutura de diretórios do Projeto
+  file { "virtualenv dir":
+    path => "/home/${user}/virtualenvs/${domain_name}",
+    ensure => directory,
+    owner => "${user}",
+    group => "${user}",
+    recurse => true,
+    require => Exec['create virtualenv']
+  }
+
+  file { ["/home/${user}/virtualenvs/${domain_name}/src",
+          "/home/${user}/virtualenvs/${domain_name}/src/requirements",
+          "/home/${user}/virtualenvs/${domain_name}/src/etc"
+          ]:
+    ensure => directory,
+    owner => "${user}",
+    group => "${user}",
+    require => File['virtualenv dir'],
+    before => File['requirements base']
+  }
+
+  file { "requirements base":
+    path => "/home/${user}/virtualenvs/${domain_name}/src/requirements/base.txt",
     ensure => file,
     owner => "${user}",
     group => "${user}",
     mode => 0644,
-    source => "${inc_file_path}/virtualenv/requirements.txt",
-    require => Exec['create virtualenv']
+    source => "${inc_file_path}/virtualenv/requirements.txt"
   }
 }
 
@@ -274,6 +297,16 @@ class software {
   }
 
   package { 'vim':
+    ensure => latest,
+    require => Class['apt']
+  }
+
+  package { 'libffi-dev':
+    ensure => latest,
+    require => Class['apt']
+  }
+
+  package { 'redis-server':
     ensure => latest,
     require => Class['apt']
   }

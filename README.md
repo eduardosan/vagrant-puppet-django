@@ -8,7 +8,7 @@ Puppet provisions:
 
 - Nginx
 - uWSGI
-- MySQL
+- PostgreSQL
 - Python
 - Virtualenv
 - Django
